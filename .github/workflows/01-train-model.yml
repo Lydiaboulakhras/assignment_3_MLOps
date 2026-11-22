@@ -1,4 +1,4 @@
-  name: 01 - Train and Deploy Model A
+name: 01 - Train and Deploy Model A
 
 on:
   push:
