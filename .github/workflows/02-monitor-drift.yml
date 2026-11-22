@@ -1,0 +1,101 @@
+name: 02 - Monitoring and Drift Detection
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: "Production data scenario"
+        type: choice
+        options: [normal, drift]
+        default: normal
+
+permissions:
+  contents: read
+  actions: write   # download artifacts + start Pipeline 3
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    outputs:
+      drift: ${{ steps.drift.outputs.drift }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install requirements
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Find the currently deployed model
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN_ID=$(gh api "repos/${{ github.repository }}/actions/artifacts?name=deployed-model" \
+            --jq '[.artifacts[] | select(.expired | not)][0].workflow_run.id')
+          echo "Deployed model comes from run $RUN_ID"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Download the deployed model
+        uses: actions/download-artifact@v4
+        with:
+          name: deployed-model
+          path: artifacts/
+          run-id: ${{ steps.find.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Generate production data
+        run: python data/generate_data.py
+
+      - name: Evaluate model on production data
+        env:
+          SCENARIO: ${{ inputs.scenario }}
+        run: |
+          if [ "$SCENARIO" = "drift" ]; then DATA=data/test_B.csv; else DATA=data/test_A.csv; fi
+          MODEL=$(ls artifacts/*.joblib | head -n 1)
+          echo "Scenario: $SCENARIO | Model: $MODEL | Data: $DATA"
+          python -m app.predict --model "$MODEL" --data "$DATA" --metrics artifacts/monitor_metrics.json
+
+      - name: Check drift (exit code 10 = DRIFT DETECTED)
+        id: drift
+        env:
+          SCENARIO: ${{ inputs.scenario }}
+        run: |
+          mkdir -p monitoring
+          set +e
+          python scripts/check_drift.py
+          CODE=$?
+          set -e
+          if [ "$CODE" -eq 10 ]; then
+            DRIFT=true
+            echo "## DRIFT DETECTED - retraining will be triggered" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$CODE" -eq 0 ]; then
+            DRIFT=false
+            echo "## NO DRIFT - Model A remains deployed" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Drift check failed with exit code $CODE"
+            exit "$CODE"
+          fi
+          echo "drift=$DRIFT" >> "$GITHUB_OUTPUT"
+          echo "{\"scenario\": \"$SCENARIO\", \"drift_detected\": $DRIFT}" > monitoring/monitoring_result.json
+          cp artifacts/monitor_metrics.json monitoring/
+
+      - name: Publish monitoring result
+        uses: actions/upload-artifact@v4
+        with:
+          name: monitoring-result
+          path: monitoring/
+
+  trigger-retraining:
+    needs: monitor
+    if: needs.monitor.outputs.drift == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Start Pipeline 3 (retraining)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run 03-retrain-model.yml --repo "${{ github.repository }}" --ref main -f monitor_run_id=${{ github.run_id }}

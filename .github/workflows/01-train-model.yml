@@ -1,0 +1,49 @@
+  name: 01 - Train and Deploy Model A
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  train-deploy-a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install requirements
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Generate data
+        run: python data/generate_data.py
+
+      - name: Run tests
+        run: python -m pytest -v tests/
+
+      - name: Train Model A
+        run: python -m app.train --train data/train_A.csv --model artifacts/model_A.joblib --metrics artifacts/model_A_train_metrics.json --version A
+
+      - name: Evaluate Model A on Test A
+        run: python -m app.predict --model artifacts/model_A.joblib --data data/test_A.csv --metrics artifacts/model_A_test_A.json
+
+      - name: Quality gate (accuracy and F1 >= 0.80)
+        env:
+          MODEL_METRICS_FILE: artifacts/model_A_test_A.json
+          ACCURACY_THRESHOLD: "0.80"
+          F1_THRESHOLD: "0.80"
+        run: python scripts/quality_gate.py
+
+      - name: Publish approved model
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployed-model
+          path: artifacts/

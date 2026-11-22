@@ -1,0 +1,62 @@
+name: 03 - Retrain and Deploy Model B
+
+on:
+  workflow_dispatch:
+    inputs:
+      monitor_run_id:
+        description: "Run ID of the Pipeline 2 run that detected drift"
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  retrain-deploy-b:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install requirements
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Get monitoring result from Pipeline 2
+        uses: actions/download-artifact@v4
+        with:
+          name: monitoring-result
+          path: monitoring/
+          run-id: ${{ inputs.monitor_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify drift was detected
+        run: |
+          cat monitoring/monitoring_result.json
+          python -c "import json,sys; r=json.load(open('monitoring/monitoring_result.json')); sys.exit(0 if r['drift_detected'] else 1)"
+
+      - name: Generate retraining data
+        run: python data/generate_data.py
+
+      - name: Train Model B on train_AB
+        run: python -m app.train --train data/train_AB.csv --model artifacts/model_B.joblib --metrics artifacts/model_B_train_metrics.json --version B
+
+      - name: Evaluate Model B on Test C
+        run: python -m app.predict --model artifacts/model_B.joblib --data data/test_C.csv --metrics artifacts/model_B_test_C.json
+
+      - name: Quality gate (accuracy and F1 >= 0.70)
+        env:
+          MODEL_METRICS_FILE: artifacts/model_B_test_C.json
+          ACCURACY_THRESHOLD: "0.70"
+          F1_THRESHOLD: "0.70"
+        run: python scripts/quality_gate.py
+
+      - name: Publish Model B as deployed-model
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployed-model
+          path: artifacts/
